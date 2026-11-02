@@ -1,10 +1,13 @@
 const path = require('path');
-require('dotenv').config({ path: path.resolve(__dirname, '.env') });
+require('dotenv').config({ path: path.join(__dirname, '../.env') });
+require('dotenv').config({ path: path.join(__dirname, '.env') });
+require('dotenv').config(); // preserves local server port / db overrides if present
 const express = require('express');
 const cors = require('cors');
 const axios = require('axios');
 const db = require('./db');
 const { encryptData } = require('./cryptoHelper');
+const sendWhatsApp = require('./config/middleware/sendWhatsApp');
 
 const app = express();
 const PORT = process.env.PORT || 4000;
@@ -185,6 +188,27 @@ app.post('/transmit', async (req, res) => {
   }
 });
 
+// Startup notification
 app.listen(PORT, () => {
   console.log(`Server A (Primary) is running on http://localhost:${PORT}`);
+  sendWhatsApp('🟢 *[SERVER A ONLINE]*\nServer A (Port 4000) aktif dan siap melayani permintaan.');
 });
+
+// Graceful Shutdown notification
+let isShuttingDown = false;
+const handleShutdown = async (signal) => {
+  if (isShuttingDown) return;
+  isShuttingDown = true;
+  console.log(`\n[Server A] Received ${signal}. Shutting down gracefully...`);
+  try {
+    await sendWhatsApp('🔴 *[SERVER A LOSS]*\nServer A (Port 4000) dimatikan / offline. Lalu lintas dialihkan ke Server B.');
+  } catch (err) {
+    console.error('[Server A] Error sending shutdown WhatsApp alert:', err.message);
+  }
+  setTimeout(() => {
+    process.exit(0);
+  }, 1000);
+};
+
+process.on('SIGINT', () => handleShutdown('SIGINT'));
+process.on('SIGTERM', () => handleShutdown('SIGTERM'));

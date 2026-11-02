@@ -1,10 +1,13 @@
 const path = require('path');
-require('dotenv').config({ path: path.resolve(__dirname, '.env') });
+require('dotenv').config({ path: path.join(__dirname, '../.env') });
+require('dotenv').config({ path: path.join(__dirname, '.env') });
+require('dotenv').config(); // preserves local server port / db overrides if present
 const express = require('express');
 const cors = require('cors');
 const axios = require('axios');
 const db = require('./db');
 const { decryptData } = require('./cryptoHelper');
+const sendWhatsApp = require('./config/middleware/sendWhatsApp');
 
 const app = express();
 const PORT = process.env.PORT || 3100;
@@ -15,6 +18,10 @@ app.use(express.json({ limit: '50mb' }));
 app.use(express.urlencoded({ limit: '50mb', extended: true }));
 
 let pendingSyncList = [];
+
+// State Tracking Variables (strictly in-memory)
+let wasServerAOffline = false; // Latch flag to ensure alerts are sent only once per state change
+let isCheckingHealth = false;
 
 // Default fallback records for Server B
 const DEFAULT_FALLBACK_CARS = [
@@ -186,28 +193,59 @@ app.get('/apiserverb/sync-status', (req, res) => {
   });
 });
 
-// Auto-Sync Worker: runs every 5 seconds
-setInterval(async () => {
+// Flush / Sync pending queue to Server A
+const flushPendingQueueToA = async () => {
   if (pendingSyncList.length === 0) {
+    console.log('[Sync] No pending queue data to flush to Server A.');
     return;
   }
+  try {
+    const itemsToSync = [...pendingSyncList];
+    console.log(`[Sync] Flushing ${itemsToSync.length} items from local pending queue to Server A...`);
+    const syncRes = await axios.post(`${SERVER_A_URL}/api/mobil/sync`, itemsToSync, { timeout: 5000 });
+    if (syncRes.status === 200 || syncRes.status === 201) {
+      pendingSyncList = [];
+      console.log('[Sync] Local pending queue successfully flushed to Server A.');
+    }
+  } catch (error) {
+    console.error('[Sync Error] Failed to flush pending queue to Server A:', error.message);
+  }
+};
+
+// 5-second interval health checker & auto-sync worker monitoring Server A
+const checkServerAHealth = async () => {
+  if (isCheckingHealth) return;
+  isCheckingHealth = true;
 
   try {
-    const health = await axios.get(`${SERVER_A_URL}/health`, { timeout: 2000 });
-    if (health.data && health.data.status === 'ok') {
-      const itemsToSync = [...pendingSyncList];
-      console.log(`[Server B Auto-Sync Worker] Server A is online! Syncing ${itemsToSync.length} pending records...`);
+    const res = await axios.get(`${SERVER_A_URL}/health`, { timeout: 3000 });
 
-      const syncRes = await axios.post(`${SERVER_A_URL}/api/mobil/sync`, itemsToSync, { timeout: 5000 });
-      if (syncRes.status === 200 || syncRes.status === 201) {
-        pendingSyncList = [];
-        console.log('[Server B Auto-Sync Worker] Auto-sync success! Pending queue cleared.');
+    if (res.status === 200 || (res.data && res.data.status === 'ok')) {
+      if (wasServerAOffline) {
+        wasServerAOffline = false;
+        console.log('[Health Check] Server A recovered. Sending recovery notification...');
+        await sendWhatsApp('✅ *[SERVER A RECOVERED]*\nServer A kembali online. Sinkronisasi data tertunda dari Server B ke Server A dimulai.');
+        await flushPendingQueueToA();
+      } else if (pendingSyncList.length > 0) {
+        // Auto-sync worker when Server A is online and pending items exist
+        await flushPendingQueueToA();
       }
+    } else {
+      throw new Error(`Server A responded with status ${res.status}`);
     }
-  } catch (workerErr) {
-    // Server A is still unreachable
+  } catch (error) {
+    if (!wasServerAOffline) {
+      wasServerAOffline = true;
+      console.log('[Health Check] Server A failed / unreachable:', error.message);
+      await sendWhatsApp('⚠️ *[FAILOVER TRIGGERED]*\nServer A terdeteksi mati! Server B (Port 3100) otomatis mengambil alih permintaan katalog mobil.');
+    }
+    // If wasServerAOffline === true, do NOT send any message (silent polling).
+  } finally {
+    isCheckingHealth = false;
   }
-}, 5000);
+};
+
+setInterval(checkServerAHealth, 5000);
 
 // Legacy routes preserved for compatibility
 app.post('/receive', async (req, res) => {
