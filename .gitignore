@@ -2,11 +2,21 @@
 node_modules/
 **/node_modules/
 
-# Environment configuration
+# Environment configuration & Secrets (API Tokens, WhatsApp/Fonnte credentials, phone numbers, DB configs)
 .env
-.env*.local
+.env*
+*.env
 **/.env
-**/.env*.local
+**/.env*
+**/*.env
+Server_A/.env
+Server_A/.env*
+Server_B/.env
+Server_B/.env*
+
+# Explicitly allow example files
+!.env.example
+!**/.env.example
 
 # Production builds
 build/
